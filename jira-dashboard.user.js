@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JIRA CaMS dashboard
 // @namespace    https://github.com/pavel-zeman
-// @version      0.1
+// @version      0.2
 // @description  JIRA CaMS dashboards
 // @author       Pavel Zeman
 // @match        https://jira.unicorn.com/secure/Dashboard.jspa*
@@ -29,10 +29,7 @@
     let recalculated = false;
     document.querySelectorAll("iframe").forEach( item => {
       const body = item.contentWindow.document.body;
-      if (body.textContent.indexOf("##") === 0) {
-        // Wait for load
-        setTimeout(recalculateSize, 1000);
-      } else {
+      if (body) {
         const nodes = body.querySelectorAll("#sprintOverview");
         if (nodes.length === 1) {
           const height = nodes[0].getBoundingClientRect().height;
@@ -43,7 +40,7 @@
       }
     });
     if (recalculated) {
-      document.querySelectorAll("div.gadget").forEach( item => {
+      document.querySelectorAll("div.gadget").forEach(item => {
         //if (item.querySelectorAll("iframe").length > 0) {
           const previous = item.previousSibling;
           if (previous && previous.className && previous.className.indexOf("gadget") >= 0 && previous.offsetTop < item.offsetTop) {
@@ -55,30 +52,10 @@
     }
   }
 
-  // Find all gadgets ready to be populated
-  const body = document.body;
-  if (body.querySelectorAll("div#page").length > 0) {
-    setTimeout(recalculateSize, 2000);
-  } else if (body.textContent.indexOf("##") === 0) {
-    const component = body.textContent.substring(2, body.textContent.indexOf("##", 2));
-    const response = await (await fetch(`/rest/api/latest/search?jql=project=cams%20and%20component=${component}%20and%20issuetype=sub-task%20and%20cf[12001]%20is%20not%20empty%20order%20by%20key&startAt=0&maxResults=10000`)).json();
-
-    const phaseMap = {};
-
-    for(let issue of response.issues) {
-      let fields = issue.fields;
-      let phase = fields.customfield_12001;
-      let item = phaseMap[phase];
-      if (!item) {
-        item = phaseMap[phase] = { phase: phase[0], kktr: 0, originalEstimate: 0, remainingEstimate: 0, logged: 0 };
-      }
-
-      item.kktr += parseKktr(fields.customfield_17113);
-      item.originalEstimate += fields.timeoriginalestimate
-      item.remainingEstimate += fields.timeestimate;
-      item.logged += fields.timespent;
-    }
-
+  /**
+   * Generates HTML with report.
+   */
+  function generateHtml(phaseMap) {
     const phases = Object.values(phaseMap).sort((a, b) => a.phase.localeCompare(b.phase));
     let html = `
 <table id="sprintOverview" width="100%">
@@ -125,6 +102,63 @@
   </tr>`;
 
     html += "</table>";
-    body.innerHTML = html;
+    return html;
+  }
+
+  /**
+   * Populates single gadget with data.
+   * The parameter contains body of the gadget.
+   */
+  async function populateGadget(body) {
+    const component = body.textContent.substring(2, body.textContent.indexOf("##", 2));
+    const fields = "customfield_12001,customfield_17113,timeoriginalestimate,timeestimate,timespent";
+    // Get data using JIRA API
+    const response = await (await fetch(`/rest/api/latest/search?jql=project=cams%20and%20component=${component}%20and%20issuetype=sub-task%20and%20cf[12001]%20is%20not%20empty%20order%20by%20key&startAt=0&maxResults=10000&fields=${fields}`)).json();
+
+    const phaseMap = {};
+
+    // Calculate statistics
+    for(let issue of response.issues) {
+      let fields = issue.fields;
+      let phase = fields.customfield_12001;
+      let item = phaseMap[phase];
+      if (!item) {
+        item = phaseMap[phase] = { phase: phase[0], kktr: 0, originalEstimate: 0, remainingEstimate: 0, logged: 0 };
+      }
+
+      item.kktr += parseKktr(fields.customfield_17113);
+      item.originalEstimate += fields.timeoriginalestimate
+      item.remainingEstimate += fields.timeestimate;
+      item.logged += fields.timespent;
+    }
+
+    body.innerHTML = generateHtml(phaseMap);
+  }
+
+  /**
+   * Populates all gadgets with data.
+   */
+  async function populateGadgets(count) {
+    let promises = [];
+    for(const item of document.querySelectorAll("iframe")) {
+      const body = item.contentWindow.document.body;
+      if (body && body.textContent.indexOf("##") === 0) {
+        promises.push(populateGadget(body));
+      }
+    }
+    if (promises.length > 0) {
+      await Promise.all(promises);
+      recalculateSize();
+    }
+    if (promises.length > 0 || count < 20) {
+      setTimeout(() => populateGadgets(count + 1), 200); // Try it again in a second to populate other gadgets loaded inbetween
+    }
+  }
+
+  const body = document.body;
+  // In Firefox, the script is invoked also for each IFRAME, but we want to ignore this
+  if (body.querySelectorAll("div#page").length > 0) {
+    // The gadgets are loaded as IFRAMEs and we need some time for them to load
+    setTimeout(() => populateGadgets(0), 200);
   }
 })();
